@@ -1,0 +1,79 @@
+# Khung xương Lakehouse: MinIO + PostgreSQL + Spark(Iceberg)
+# Chạy:  docker compose up -d
+services:
+  postgres:
+    image: postgres:16
+    container_name: lh-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ecommerce            # DB nguồn giao dịch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d   # tạo thêm DB iceberg_catalog
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: lh-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # Web console
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  minio-init:                            # tạo bucket 'lakehouse' một lần rồi thoát
+    image: minio/mc:RELEASE.2024-10-29T15-34-59Z
+    container_name: lh-minio-init
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do sleep 2; done;
+      mc mb --ignore-existing local/lakehouse;
+      echo 'Bucket lakehouse san sang';
+      "
+
+  spark:
+    image: apache/spark:3.5.3-python3
+    container_name: lh-spark
+    user: root                           # đơn giản hóa quyền ghi cache khi dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    command: ["sleep", "infinity"]       # giữ container sống, chạy job bằng docker compose exec
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin123}
+      AWS_REGION: us-east-1
+      PG_USER: ${POSTGRES_USER:-postgres}
+      PG_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    ports:
+      - "4040:4040"                      # Spark UI khi job đang chạy
+    volumes:
+      - ./pipelines:/opt/pipelines
+      - ./generator:/opt/generator
+      - ivy_cache:/ivy                   # cache jar, đỡ tải lại mỗi lần
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  minio_data:
+  ivy_cache:
